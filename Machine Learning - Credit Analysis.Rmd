@@ -1,0 +1,277 @@
+---
+title: "Credit Data Analysis"
+author: "Luke Hansen"
+date: "04/06/2022"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+
+## Data Preperation
+
+### a) 
+We will first read in our credit data set and perform some basic exploratory data analysis, including:
+
+-Convert first row to column names
+-Convert columns to type integer, as they are read in as characters
+-Check for missing values
+-Convert our response variable Y to a factor and rename to "Def" (for default)
+-Convert categorical variables to factors
+-Inspect proportions of default vs. non-default
+-Drop first variable "ID" as it s not relevant for our analysis
+
+We will then divide our data set into a random sample of 70% for training data, with the remaining 30% for testing
+```{r}
+#Read in file
+credit <- read_excel("C:/Users/60234651/Downloads/CreditCard_Data.xls", col_names = TRUE)
+#First row as column names
+colnames(credit) <- credit[1,]
+credit <- as.data.frame(credit[-1,]) 
+#rename output variable
+credit <- credit %>%
+  rename(def = 25) 
+#Convert columns first to int, as all are of type chc
+creditfinal <- credit %>%
+  mutate_if(is.character,as.integer)
+creditfinal <- creditfinal[,-1]
+#Convert gender, education, marriage and default to factor
+factors <- c(2,3,4,6,7,8,9,10,11,24)
+creditfinal[,factors] <- lapply(creditfinal[,factors], factor)
+summary(creditfinal)
+str(creditfinal)
+summary(creditfinal)
+#Check for missing values
+sum(is.na(creditfinal))
+#inspect split of default
+table(creditfinal$def)
+#Significantly more non-default (0) than default (1)
+#Visualize numerical variables by default (Bill Amount)
+pairs(creditfinal[,12:17], col = creditfinal$def, lower.panel = NULL)
+par(xpd = TRUE)
+legend("bottomleft", fill = unique(creditfinal$def), legend = c( levels(creditfinal$def)))
+#Visualize numerical variables by default (Pay Amount)
+pairs(creditfinal[,18:23], col = creditfinal$def, lower.panel = NULL)
+par(xpd = TRUE)
+legend("bottomleft", fill = unique(creditfinal$def), legend = c( levels(creditfinal$def)))
+#Visualize categorical variables (non-financial)
+ggplotGrid(ncol = 3,
+  lapply(c("SEX", "EDUCATION", "MARRIAGE", "AGE", "def"),
+    function(col) {
+        ggplot(creditfinal, aes_string(col)) + geom_bar()
+    }))
+#Set seed
+set.seed(3456)
+#Create 70% training set, 30% testing set
+trainIndex <- createDataPartition(creditfinal$def, p = .7, list = FALSE)
+train <- creditfinal[ trainIndex,]
+test <- creditfinal[-trainIndex,]
+#Check dimensions of both
+dim(train)
+dim(test)
+```
+## Tree Based Algorithms
+### a)
+We will now fit a classification tree to our training data set in order to predict whether a client will default or not. Our tree will be categorical in nature, and we will use all 23 predictors in order to predict the output variable default. We will first build a classification tree using rpart. We will use a minsplit() of 3, which is the minimum number of observations that must exist in a node before a split is attempted, and a minbucket() size of 1, which is the minimum number of observations in any leaf node (Hastie, 2009). Our overall complexity parameter is 0.001 and we will use 10 iterations of cross validation.
+```{r}
+library(rpart)
+library(rpart.plot)
+set.seed(1234)
+
+#Build basic classification tree with loose initial constraints
+#Minsplit = 5 (minimum number of observations in node)
+#Minbucket = 1 (minimum number of obs in terminal node)
+#Xval = cross validation = 10
+tree.def <- rpart(def~., train,  method = "class", control=rpart.control(minsplit=3, minbucket=1, cp=0.001, xval = 10))
+#Plot initial tree
+rpart.plot(tree.def, yesno = T, type = 2, fallen.leaves = T, digits = 1, tweak = 1.3, varlen = 0)
+
+#Insect cross validation error
+plotcp(tree.def, upper = "splits")
+#Prune tree to create optimal decision based on cross validated error, which is a cp value of 0.027. This will prevent overfitting of the model. 
+tree.prune<- prune(tree.def,cp= tree.def$cptable[which.min(tree.def$cptable[,"xerror"]),"CP"])
+rpart.plot(tree.prune, yesno = T, type = 2, fallen.leaves = T, digits = 1, varlen = 0)
+ptree <- predict(tree.prune, train, type = "class")
+
+confusionMatrix(ptree, train$def)
+#Check random forest, mtry = sqrt p approx = 5
+library(randomForest)
+rf.credit <- randomForest(def~., data = train, mtry = 5)
+#Determin optimal mtry value using tunerf
+mtry <- tuneRF(train[,-24],train$def, ntreeTry=500,
+               stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+print(mtry)
+#Therefore three is the optimal value
+rf.credit <- randomForest(def~., data = train, mtry = 3)
+rf.pred.train <- predict(rf.credit, train, type = "class")
+confusionMatrix(rf.pred.train, train$def)
+#Significant increase in accuracy of training data, hence we will use random forest. 
+```
+### b) 
+Display model summary and discuss the relationship between the response variable
+versus selected features.
+Compared to our initial classification tree, the random forest was found to significantly increase prediction accuracy on the training data set. By applying the random forest algorithm, a "forest" of uncorrelated  decision trees are generated, with each decision tree using a random subset of features by way of bagging. In this instance, The optimal value of mtry, which is the number of variables randomly sampled as candidates at each split, was found to be three.500 trees were used, with the final output of the model the mean output from these 500 trees. Inspecting the Out of Bag error rate, which is the number of wrongly classified outcomes from the out of bag sample, we have a value of 18.28%. That is, our model predicts the OOB samples with correctly 81.72% accuracy. 
+
+```{r}
+#Inspect model summary
+rf.credit
+```
+
+```{r}
+#Inspect variable importance
+rf.credit$importance
+#Create data frame for variable importance based on mean GINI score
+var.imp <- importance(rf.credit)
+var.imp <- as.data.frame(var.imp) %>% 
+  mutate(variable = row.names(.)) #Create new column for variables to use in plotting
+#Plot variable importance using mean decrease in Gini score, descending
+ggplot(var.imp, aes(x = reorder(variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+    geom_bar(stat='identity', aes(fill = variable)) +
+    coord_flip() +
+    theme_classic() +
+    theme(legend.position = "none")+
+    labs(
+      x     = "Variable",
+      y     = "Mean Decrease Gini",
+      title = "Variable Importance in Random Forest for Credit Data"
+    ) 
+rf.credit
+```
+
+The measure used for variable importance in our model is the GINI score. Gini Impurity measures how frequently a randomly chosen observation from the data set used to train the model will be incorrectly labeled if it was randomly labeled according to the distribution of labels in the subset.As such, Mean Decrease in Gini is the mean of a variable’s decrease in node impurity. This is weighted by the proportion of samples in the node in each individual tree in our random forest. Hence variable importance is measured by this mean decrease. Inspecting our plot of variable importance, we can clearly see that pay_0 results in the highest mean decrease in Gini score. This variable is the individuals repayment status in Septermber 2005, which makes sense as this is the first historical repayment status variable used in the data set.Bill_AMT1 and BILL_AMT2 were next importance, which detail the amount of bill statement for September and August 2005 respectivelely. An individuals age was the fourth most importance variable.
+
+### 2.2.2 c)
+We will now evaluate the performance of both our initial classification tree, pruned classification tree and our improved random forest model on the training data set, using the predict function.
+```{r}
+#Predict function for our pruned tree and random forest
+a <- predict(tree.prune, train, type = "class")
+b <- predict(rf.credit, train, type = "class")
+#Evaluate accuracy using confusion matrix
+confusionMatrix(a,train$def)
+confusionMatrix(b,train$def)
+#Investigate ROC
+roc_tree <- roc(response=train$def, predictor= factor(a, 
+ordered = TRUE)
+roc_forest <- roc(response=train$def, predictor= factor(b, 
+ordered = TRUE)
+#Plot ROC for both pruned tree and random forest
+par(mfrow=c(1,1))
+plot(roc_tree, col="red", lwd=3, main="ROC Class. Tree (Red) vs. Random Forest (Green)")
+lines(roc_forest, col = "green")
+#Evaluate AUC for both
+auc_tree<-auc(roc_tree)
+auc_rf <- auc(roc_forest)
+table(auc_tree, auc_rf)
+
+```
+It can be seen that Our initial pruned classification tree had an accuracy rate of 82.11% on the training data (Correctly identified whether a default would occur for a client in 82.11% of cases). Comparatively, our random forest model had a singnificantly higher accuracy of 99.11%. Whilst this is a great result, it may suggest over fitting over the model. We will explore this further when predicting our test data in Section 3. 
+When examining the area under the cover for our classification tree and random forest, we can see that AUC value for the random forest is significantly higher (0.98 vs 0.67), suggesting our random forest model is significantly better at distinguishing between the default classes. 
+
+## 2.2.3 Support Vector Classifier 
+### a)
+We will now apply a support vector classifier to our data set in order to determine credible/non-credible clients. We will use the SVM function from the e1071 package to do so.  We have already split our data set into 70% training and 30% test. Since we have 23 predictor variables, we are unable to test for linear separability by visualizing our data, in order to determine whether to apply a linear or non-linear kernel. We will hence create an SVM model using linear and radial  kernels in order to determine which is most suitable for our data set. Note, the present report attempted to build a model using a polynomial kernel, however the computational running time was far too significant. The caret package will be used to build our SVM models.  Again, The computational capacity required to determine the optimal kernel method took an exceedingly long amount of time (>24 hours). As a result, a random subset of 1000 observations of the training data was used in assessment of the most accurate kernel for our data set. The tune.svm function to find the optimal cost parameter, before fitting the model to the full training data set.  
+```{r}
+library(caret)
+set.seed(1234)
+#Create random sample of 1000 observations 
+sample.train.svm <- train[sample(nrow(train), 1000),]
+#Set control fpr 10 Fold repeated cross validation
+ctrl <- trainControl(method = "repeatedcv", repeats = 10)
+svm.linear <- train(def~., data=sample.train.svm, method = "svmLinear")
+svm.radial <- train(def~., data=sample.train.svm, method = "svmRadial")
+svm.linear
+svm.radial
+```
+In comparing the summary for our SVMs using linear and radial kernels, it can be seen that both models used all 23 predictors, with bootstrapped resampling of 25 repetitions.  A cost vale of 1 was used for the linear kernel, and cost values of 0.25, 0.5 and 1 were used for the radial kernel. We can see that the accuracy for the linear kernel is signifiantly less (0.6078) compared to the radial kernel (0.7808 using a cost value of 0.25) on our subset of the training data. As a result, we will build our model using a radial kernel and will tune our model parameters of cost and sigma. We will now use our training data set to find the optimal cost and sigma parameter, and will also perform 10 fold repeated cross validation
+```{r}
+#Set train control for repeated cross validaton
+#Create grid for different cost values
+tune.grid <- expand.grid(C = c(0,1, 0.25, 0.5, 1, 5, 10))
+svm.tune <- train(def~., data = sample.train.svm, method = "svmRadial", trControl = trainControl("cv", number = 10),
+                  tuneLength = 10)
+svm.tune
+svm.tune$finalModel
+```
+
+
+### b)
+We will now investigate the model summary of our tuned support vector machine, with radial kernel.
+```{r}
+#Investigate model summary
+svm.tune
+svm.tune$finalModel
+#Plot cost values
+plot(svm.tune)
+```
+We can see that tuning our models cost parameter as well as performing 10-fold repeated cross validation improved our model's accuracy to 0.7840 on the subset of 1000 observations of the training data, with a training error rate f 0.198 The optimal cost parameter was found to be 2.0, and the optimal sigma was 1.386058e-10. 628 support vectors were generated for our model in order to distinguish between default and non-default observations, using all 23 predictor variables. Based on the use of the radial kernel in our support vector machine model, we will use the rminer package to determine the proposed variable importance, using our optimal parameters found using tune.svm. The Importance function in rminer allows us to extract the variable importance using percentage of explained variance, which can be visualized using the mgraph function from the same package.
+```{r}
+#var.imp <- fit(def~., data=sample.train.svm, model="svm", kpar=list(sigma=1.386058e-10), C=2, kernel="rbfdot")
+#svm.imp <- Importance(M, data=sample.train.svm)
+#L=list(runs=1,sen=t(svm.imp$imp),sresponses=svm.imp$sresponses)
+#mgraph(L,graph="IMP",leg=names(sample.train.svm),col ="orange",Grid=10,
+       #main = "Variable Importance in SVM Model", axis = 1)
+```
+Inspecting the variable importance output, we can clearly see our numerical predictors (bill_amt and pay_amt) account for significantly more variation in our model, compared to the categorical variables that were converted to factors (age, pay, education, sex and marriage). Whilst we assume that our radial kernel may have sliightly different values for variable importance, we can assume that it holds a similar structure. 
+
+### c)
+we will now assess the accuracy of our support vector machine model on the training data set, using the predict function. 
+
+```{r}
+#Create prediction for training data using predict
+svm.pred.train <- predict(svm.tune, newdata =  train)
+#create confusion matrix
+confusionMatrix(svm.pred.train, train$def)
+roc_svm <- roc(response=train$def, predictor= factor(svm.pred.train, 
+ordered = TRUE))
+auc_svm <- auc(roc_svm)
+auc_svm
+
+```
+It can be seen that the accuracy of our model on the training data set was 0.7766, with an AUC value of 0.5017. This meant that our error rate was (1 - 0.7766), or 0.2234. This means that for our training data, our SVM model incorrectly predicted an observations default status in 22.34% of cases. This is significantly less than our accuracy of our random forest model (which was 0.9912 and an AUC value of ). We will now assess both of our models on our testing data set.
+
+## 2.2.4 Prediction
+
+We will now investigate how well our random forest and support vector machine perform on our testing data set, which is 30% of our original data set, in predicting an observations default class. We will first assess our Random Forest model, built with 500 trees and random variable sample size of 3 for each split (mtry)  
+
+```{r}
+#Create prediction using random forest model rf.credit
+rf.pred.test <- predict(rf.credit, newdata = test)
+#Compare predicted vs actual in confusion matrix
+confusionMatrix(rf.pred.test, test$def)
+#Generate ROC for rf prediction test data
+roc_rftest <- roc(response=test$def, predictor= factor(rf.pred.test,
+ordered = TRUE))
+auc_rftest <- auc(roc_rftest)
+auc_rftest
+```
+It can be seen that for our random forest model, our accuracy in predicting the default status of our testing data set significantly dropped to 0.8212%, with an AUC value of 0.6565. This is still a good accuracy rate. We will now assess our support vector machine model.
+```{r}
+#Create prediction using random forest model rf.credit
+svm.pred.test <- predict(svm.tune, newdata = test)
+#Compare predicted vs actual in confusion matrix
+confusionMatrix(svm.pred.test, test$def)
+#Generate ROC for rf prediction test data
+roc_svmtest <- roc(response=test$def, predictor= factor(svm.pred.test,
+ordered = TRUE))
+auc_svmtest <- auc(roc_svmtest)
+par(mfrow=c(1,1))
+plot(roc_rftest, col="red", lwd=3, main="ROC SVM (green) vs. Random Forest (Green) (Test Data)")
+lines(roc_svmtest, col = "green")
+```
+We can see that our accuracy in predicting the default status of our testing data set for our support vector machine was 0.7749, which is very consistent with out accuracy on the training data set of 0.7766. The AUC value was found to be 0.5001, again similar to our training SVM AUC of 0.5017. 
+Clearly, our Random forest performed better than our Support vector Machine in predicting the default status of observations in both our training and test data set. However, it must be noted that the accuracy of our random forest model was significantly higher in our training data, suggesting over-fitting has occurred. Whilst the out of bag error estimate of random forests aim to reduce bias, the literature is divided as to whether cross validation can improve models (James et al. 2021, ;Breiman). As such, our model could be improved using cross validation. However, on the whole our model performed well on the testing data.
+Comparatively, our Support Vector Machine had a significantly lower accuracy on our training data, but maintained a similar accuracy on our testing data set, suggesting that our svm model is not over fit. Whilst the lower accuracy for both training and testing was concerning when compared to the random forest, it must be noted that our model was built using only 1000 observations of our training data set due to computational power. Further analysis could explore the use of principal component analysis to reduce the number of features  Furthermore, literature does suggest that support vector machines tend to perform better on numerical predictors than categorical (Stanikov, 2008): our data set had a mixtures of both numerical and categorical variables. Inspection of the variable importance graph in section 2.2.2 b further supports this by showing that the our numerical variables accounted for significantly more variation in our model when compared to the categorical variables. Further investigation could be applied to our data set by one-hot encoding the categorical variables to create a full numerical data set, in which we would assume accuracy would increase for our SVM model. 
+
+
+### References
+
+Breiman, L., 2022. Random forests - classification description. [online] Stat.berkeley.edu. Available at: <https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm> [Accessed 3 June 2022].
+
+Hastie, T., Friedman, J. and Tisbshirani, R., 2017. The Elements of statistical learning. New York: Springer.
+
+James, G. and Hastie, T., 2021. An Introduction to Statistical Learning. New York: Springer.
+
+Statnikov, A., Wang, L. and Aliferis, C., 2008. A comprehensive comparison of random forests and support vector machines for microarray-based cancer classification. BMC Bioinformatics, 9(1).
+
+Yeh, I. and Lien, C., 2009. The comparisons of data mining techniques for the predictive accuracy of probability of default of credit card clients. Expert Systems with Applications, 36(2), pp.2473-2480.
