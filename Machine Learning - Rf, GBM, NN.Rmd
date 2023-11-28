@@ -1,0 +1,292 @@
+---
+title: "MA5832 Capstone"
+output:
+  word_document: default
+  html_document: default
+date: '2022-06-06'
+---
+```{r}
+#Install required packages
+require(NeuralNetTools)
+require(tidyverse)
+require(ggplot2)
+require(caret)
+require(quadprog)
+require(caret)
+require(dplyr)
+require(readxl)
+require(RColorBrewer)
+require(pROC)
+require(e1071)
+require(psych)
+require(rminer)
+require(miscset)
+require(lubridate)
+require(mice)
+require(VIM)
+require(randomForest)
+require(gbm)
+require(vip)
+```
+
+2. Data Preparation and Cleaning
+```{r}
+#Set seed
+set.seed(123)
+#Get data 
+#Read in first column as type date, remaining 8 as numeric
+aus_data <- read_excel("C:/Users/60234651/OneDrive - NSW Health Department/Desktop/UNI/MA5832/AUS_Data.xlsx", col_types = c("date", rep("numeric", 8)))
+
+#Inspect dataset
+head(aus_data)
+
+#Remove first row (variable description, now NA as read in as type date/numeric
+
+aus_data <- aus_data[-1,]
+#Inspect structure of variables
+str(aus_data)
+
+#Change name of ...` (date) to date
+aus_data <- aus_data %>% 
+  rename(period = ...1)
+
+#Convert first column to date from POSIXct
+aus_data$period <- as.Date(aus_data$period)
+
+#Round numerical columns to one decimal place
+aus_data <- aus_data %>% 
+  mutate_if(is.numeric, ~round(., 1))
+
+#Inspect summary of variables
+summary(aus_data)
+
+#Check for missing values
+sum(is.na(aus_data))
+
+#Inspect rows with missing values
+aus_data[!complete.cases(aus_data),]
+
+#Inspect pattern of missing values using mice
+md.pattern(aus_data)
+
+#Use mice for PMM imputation
+aus_data_imp <- mice(aus_data, meth = "pmm")
+
+#Inspect imputed values using stripplot
+stripplot(aus_data_imp, pch = 18)
+
+#update aus_data with imputed values
+aus_data <- complete(aus_data_imp)
+
+#Extract new data frame from last 21 years using lubridate
+aus_data_21 <- aus_data %>% 
+  filter(period >= as.Date("1999-03-01"))
+
+#Viusalize unemployment rate over time period from 1999-2020
+ggplot(aus_data_21, aes(x = period, y = Y)) +
+  geom_line(color = "orange", size = 1.1) +
+  ggtitle("Unemployment Rate in Australia (1999-2020)")+
+  xlab("") +
+  ylab("Unemployment Rate (%)")
+
+#Inspect variable summary
+summary(aus_data)
+
+#Inspect variable distribution using pairs.panels
+pairs.panels(aus_data[,-1], hist.col = "orange", density = F, smoother = T, stars = T)
+
+#Separate period into year and month using lubridate
+aus_data <-  aus_data %>% 
+  mutate_at(vars(period), funs(year, month, day))
+
+#Drop period and day column
+aus_data <- aus_data[,-c(1,12)]
+
+#Normalize data between [0,1] using min max method
+max <- apply(aus_data, 2, max) 
+min <- apply(aus_data, 2, min)
+aus_data_scaled<- as.data.frame(scale(aus_data, center = min, scale = max - min))
+
+#Create data partition for training and testing, with testing being >March 2018
+train <- aus_data_scaled[1:147,]
+test <- aus_data_scaled[148:158,]
+```
+
+3 a. Random Forest Model
+```{r}
+set.seed(123)
+#Build initial random forest model
+rf.aus <- randomForest(Y~., data = train)
+
+#Inspect summary
+summary(rf.aus)
+
+#Use random forest model to predict on test data
+rf.pred <- predict(rf.aus, newdata = test)
+
+#Extract MSE for test data
+mse.rf.aus <- mean((test$y-rf.pred)^2)
+```
+
+3b Gradient Boosting Machine 
+```{r}
+set.seed(123)
+#Build initial GBM model
+boost.aus <- train(Y~., data = train, method = "gbm")
+
+#Plot gbm model
+plot(boost.aus)
+
+#Use gbm model to predict on test data
+boost.pred <- predict(boost.aus, newdata = test)
+
+#Inspect summary of gbm model
+summary(boost.pred)
+
+#Assess MSE of prediction on test data
+mse.boost.pred <- mean((test$y-boost.pred)^2)
+
+```
+
+
+3b Tuning GBM Model
+```{r}
+set.seed(123)
+#Create train control for k fold repeated cross-validation
+tr.control <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+
+#Use system.time to time model, Create grid for hyperparameter values to be tuned 
+timegbm <- system.time(
+  {
+gbm.hyp <- expand.grid(interaction.depth = c(1:10) , n.trees = seq(50, 6000, by = 50), shrinkage =  c(0.1, 0.01), n.minobsinnode = c(1:10))
+
+#Tune model based on hyperparameters
+gbm.tune <- train(Y~., data = train, method = "gbm", trControl = tr.control, tuneGrid = gbm.hyp, verbose = F)
+
+#Refine tuning parameters 
+gbm.hyp2 <- expand.grid(interaction.depth = c(5,6,7) , n.trees = seq(5000, 7000, by = 50), shrinkage = 0.01, n.minobsinnode = c(2,3,4))
+
+#Tune model based on hyperparameters
+gbm.tune2 <- train(Y~., data = train, method = "gbm", trControl = tr.control, tuneGrid = gbm.hyp2, verbose = F)
+
+})
+#Plot tuned hyper-parameters
+plot(gbm.tune2, main = "Tuning Hyper-Parameters for Gradient Boosting")
+
+final.gbm <- gbm.tune2$finalModel
+#Inspect final gbm model summary
+summary(final.gbm)
+```
+
+3c Assessing accuracy in predicting training data
+```{r}
+#Predict training data using model
+pred.gbm.final.train <- predict(final.gbm, train)
+
+#Extract MSE of model on training data
+mse.boost.pred.train <- mean((train$Y-pred.gbm.final.train)^2)
+plottraingb <- as.data.frame(cbind(pred = pred.gbm.final.train, actual =train$Y))
+
+#Plot predicted vs actuals for training data
+ggplot(plottraingb, aes(x=pred, y= actual)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values', y='Actual Values', title='GBM - Predicted vs. Actual Values - Training Data Set')
+
+#Plot variable importance using vip
+vip(final.gbm, mapping = aes_string(fill = "Variable"))
+
+#plot partial dependency plot for two most important variables
+par(mfrow=c(1,2))
+plot(final.gbm, i.var = "X5", lwd = 3, xlab = "")
+plot(final.gbm, i.var = "X6", lwd = 3, xlab = "")
+```
+
+3.4 Assessing GBM model on testing data
+
+```{r}
+#Mean square error
+pred.gbm.final.test <- predict(final.gbm, test)
+mse.boost.pred.test <- mean((test$Y-pred.gbm.final.test)^2)
+mse.boost.pred.test
+plottestgb <- as.data.frame(cbind(pred = pred.gbm.final.test, actual =test$Y))
+#Plot predicted vs actuals
+ggplot(plottestgb, aes(x=pred, y= actual)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values', y='Actual Values', title='Predicted vs. Actual Values - Testing Data Set')
+```
+
+
+4. Neural Network (including 4d varying number of hidden layers/neurons)
+```{r}
+set.seed(123)
+#Create initial neural network model
+nn <- train(Y~., data = train, method = "neuralnet", learningrate =0.01)
+nn$results
+
+#Predict on testing set
+nn.pred <- predict(nn, test)
+
+#calculate MSE on testing prediction
+MSE.nn <- mean((test$Y-nn.pred)^2)
+
+#Tune NN Model
+#Traincontrol for cross validation
+tr.control <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+
+
+#Time model using system.time()
+timenn <- system.time(
+  {
+   #Create tune grid for hidden layers
+tune.grid.nn <- expand.grid(layer1 = c(5:7), layer2 = c(0:7), layer3 = c(0:7))
+
+#Implement tuned model to determine optimal number of layers 
+nn.tune <- train(Y~., data = train, method = "neuralnet", tuneGrid = tune.grid.nn, trControl = tr.control, learningrate =0.01)
+})
+
+#Visualize impact of different hidden neurons and layers
+plot(nn.tune)
+plotnet(nn.tune)
+
+
+
+
+
+```
+
+
+4b Assess model on training data
+```{r}
+#Assess predictive performance on the training data set
+nn.pred.train <- predict(nn.tune, train)
+MSE.nn.train <- mean((train$Y-nn.pred.train)^2)
+
+#Extract predicted/actuals for plotting
+plottrainnn <- as.data.frame(cbind(pred = nn.pred.train, actual =train$Y))
+
+#Plot predicted vs actuals
+ggplot(plottrainnn, aes(x=pred, y= actual)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values', y='Actual Values', title='Predicted vs. Actual Values - Training Data Set')
+
+```
+
+```{r}
+#Assess predictive performance on the test data set
+nn.pred.test <- predict(nn.tune, test)
+MSE.nn.test <- mean((test$Y-nn.pred.test)^2)
+
+#Extract predicted/actuals for plotting
+plottestnn <- as.data.frame(cbind(pred = nn.pred.test, actual =test$Y))
+
+#Plot predicted and actual values
+ggplot(plottestnn, aes(x=pred, y= actual)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values', y='Actual Values', title='Predicted vs. Actual Values - Testing Data Set')
+```
+
+
