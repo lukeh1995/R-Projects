@@ -2,6 +2,7 @@ install.packages("caret")
 install.packages("randomForest")
 install.packages("e1071")
 install.packages("pROC")
+install.packages("reshape2")
 
 
 #Install required packages
@@ -13,6 +14,7 @@ library(caret)
 library(randomForest)
 library(e1071)
 library(pROC)
+library(reshape2)
 
 #Get dataset
 data <- read.csv("fetal_health.csv")
@@ -59,4 +61,6 @@ plot <- plot +
   geom_text(data = fetal_count, aes(x = fetal_health_actual, y = n, label = paste0(n, " (", round(percentage, 1), "%)")),
             vjust = -0.5, color = "black", size = 3.5)
 
+#Visualise variables
+# Melt the dataset
 
